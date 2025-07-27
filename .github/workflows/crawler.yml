@@ -70,29 +70,44 @@ jobs:
 
     - name: 📁 创建目录结构
       run: |
+        # 使用更安全的日期格式
         TIMESTAMP=$(date '+%Y/%m/%d')
+        TIMESTAMP_SAFE=$(date '+%Y-%m-%d')  # 用于文件名的安全格式
+        CRAWL_TIME=$(date '+%H-%M-%S')
+        
+        # 创建目录结构，确保所有中间目录都被创建
         mkdir -p "results/$TIMESTAMP"
         mkdir -p "results/final"
         mkdir -p "results/logs"
         mkdir -p "results/stats"
+        
+        # 设置环境变量
         echo "CRAWL_DATE=$TIMESTAMP" >> $GITHUB_ENV
-        echo "CRAWL_TIME=$(date '+%H-%M-%S')" >> $GITHUB_ENV
+        echo "CRAWL_DATE_SAFE=${TIMESTAMP_SAFE}" >> $GITHUB_ENV
+        echo "CRAWL_TIME=${CRAWL_TIME}" >> $GITHUB_ENV
+        
+        # 验证目录创建
+        echo "创建的目录结构:"
+        find results -type d | sort
 
     - name: 🎯 准备目标 URL
       run: |
         echo "$TARGET_URLS" | tr ',' '\n' > results/target_urls.txt
+        echo "目标 URL 列表:"
         cat results/target_urls.txt
 
     - name: 🕷️ 开始爬取
       run: |
         OUTPUT_DIR="results/$CRAWL_DATE"
         OUTPUT_FILE="$OUTPUT_DIR/crawl_${CRAWL_TIME}.jsonl"
+        LOG_FILE="results/logs/crawl_${CRAWL_DATE_SAFE}_${CRAWL_TIME}.log"
         
-        echo "开始时间: $(date)"
+        echo "开始时间: $(date)" | tee "$LOG_FILE"
+        echo "输出文件: $OUTPUT_FILE" | tee -a "$LOG_FILE"
         
         # 构建并执行 Katana 命令
         if [ "$HEADLESS_MODE" = "true" ]; then
-          echo "🖥️ 启用无头浏览器模式..."
+          echo "🖥️ 启用无头浏览器模式..." | tee -a "$LOG_FILE"
           katana \
             -list results/target_urls.txt \
             -d $CRAWL_DEPTH \
@@ -113,10 +128,11 @@ jobs:
             -hl \
             -sc \
             -nos \
-            -ef png,jpg,jpeg,gif,js,css,ico,woff,woff2,ttf,svg || {
-            echo "⚠️ Katana 执行完成，可能存在部分错误"
+            -ef png,jpg,jpeg,gif,js,css,ico,woff,woff2,ttf,svg 2>&1 | tee -a "$LOG_FILE" || {
+            echo "⚠️ Katana 执行完成，可能存在部分错误" | tee -a "$LOG_FILE"
           }
         else
+          echo "🖥️ 使用标准模式..." | tee -a "$LOG_FILE"
           katana \
             -list results/target_urls.txt \
             -d $CRAWL_DEPTH \
@@ -134,20 +150,22 @@ jobs:
             -jsonl \
             -o "$OUTPUT_FILE" \
             -v \
-            -ef png,jpg,jpeg,gif,js,css,ico,woff,woff2,ttf,svg || {
-            echo "⚠️ Katana 执行完成，可能存在部分错误"
+            -ef png,jpg,jpeg,gif,js,css,ico,woff,woff2,ttf,svg 2>&1 | tee -a "$LOG_FILE" || {
+            echo "⚠️ Katana 执行完成，可能存在部分错误" | tee -a "$LOG_FILE"
           }
         fi
         
-        echo "结束时间: $(date)"
+        echo "结束时间: $(date)" | tee -a "$LOG_FILE"
         
         # 检查输出文件
         if [ -f "$OUTPUT_FILE" ]; then
-          echo "✅ 爬取完成，结果保存到: $OUTPUT_FILE"
-          echo "文件大小: $(du -h "$OUTPUT_FILE" | cut -f1)"
-          echo "URL数量: $(wc -l < "$OUTPUT_FILE")"
+          FILE_SIZE=$(du -h "$OUTPUT_FILE" | cut -f1)
+          URL_COUNT=$(wc -l < "$OUTPUT_FILE")
+          echo "✅ 爬取完成，结果保存到: $OUTPUT_FILE" | tee -a "$LOG_FILE"
+          echo "文件大小: $FILE_SIZE" | tee -a "$LOG_FILE"
+          echo "URL数量: $URL_COUNT" | tee -a "$LOG_FILE"
         else
-          echo "❌ 未生成输出文件"
+          echo "❌ 未生成输出文件，创建空文件" | tee -a "$LOG_FILE"
           touch "$OUTPUT_FILE"
         fi
 
@@ -157,28 +175,41 @@ jobs:
         OUTPUT_FILE="$OUTPUT_DIR/crawl_${CRAWL_TIME}.jsonl"
         FINAL_FILE="results/final/all_urls.txt"
         FINAL_JSONL="results/final/all_results.jsonl"
-        STATS_FILE="results/stats/stats_${CRAWL_DATE/\//-}_${CRAWL_TIME}.txt"
+        STATS_FILE="results/stats/stats_${CRAWL_DATE_SAFE}_${CRAWL_TIME}.txt"
+        
+        echo "创建统计文件: $STATS_FILE"
         
         # 创建统计文件
-        echo "=== Katana 爬取统计报告 ===" > "$STATS_FILE"
-        echo "爬取时间: $(date)" >> "$STATS_FILE"
-        echo "目标 URL: $TARGET_URLS" >> "$STATS_FILE"
-        echo "爬取深度: $CRAWL_DEPTH" >> "$STATS_FILE"
-        echo "爬取持续时间: $CRAWL_DURATION" >> "$STATS_FILE"
-        echo "无头模式: $HEADLESS_MODE" >> "$STATS_FILE"
-        echo "" >> "$STATS_FILE"
+        cat > "$STATS_FILE" << EOF
+        === Katana 爬取统计报告 ===
+        爬取时间: $(date)
+        目标 URL: $TARGET_URLS
+        爬取深度: $CRAWL_DEPTH
+        爬取持续时间: $CRAWL_DURATION
+        无头模式: $HEADLESS_MODE
+        EOF
         
         # 处理当前结果
         if [ -f "$OUTPUT_FILE" ] && [ -s "$OUTPUT_FILE" ]; then
           # 提取URL到纯文本文件
           CURRENT_URLS="$OUTPUT_DIR/urls_${CRAWL_TIME}.txt"
-          jq -r '.url // empty' "$OUTPUT_FILE" 2>/dev/null | sort -u > "$CURRENT_URLS" || {
-            # 如果jq失败，尝试直接提取URL（假设每行是URL）
-            grep -E '^https?://' "$OUTPUT_FILE" | sort -u > "$CURRENT_URLS" || {
-              echo "⚠️ 无法解析JSONL文件，创建空文件"
+          
+          # 尝试解析JSONL文件
+          if command -v jq >/dev/null 2>&1; then
+            jq -r '.url // empty' "$OUTPUT_FILE" 2>/dev/null | grep -E '^https?://' | sort -u > "$CURRENT_URLS" || {
+              echo "⚠️ jq 解析失败，尝试直接提取URL"
+              grep -E '^https?://' "$OUTPUT_FILE" | sort -u > "$CURRENT_URLS" || {
+                echo "⚠️ 无法解析文件，创建空文件"
+                touch "$CURRENT_URLS"
+              }
+            }
+          else
+            # 没有jq命令时的备用方案
+            grep -oE 'https?://[^"]*' "$OUTPUT_FILE" | sort -u > "$CURRENT_URLS" || {
+              echo "⚠️ 无法解析文件，创建空文件"
               touch "$CURRENT_URLS"
             }
-          }
+          fi
           
           CURRENT_COUNT=$(wc -l < "$CURRENT_URLS")
           echo "本次爬取URL数量: $CURRENT_COUNT" >> "$STATS_FILE"
@@ -218,12 +249,15 @@ jobs:
         echo "" >> "$STATS_FILE"
         echo "=== 目录结构 ===" >> "$STATS_FILE"
         find results -type f -name "*.txt" -o -name "*.jsonl" -o -name "*.log" | while read file; do
-          size=$(du -h "$file" | cut -f1)
-          lines=$(wc -l < "$file" 2>/dev/null || echo "0")
-          echo "$file ($size, $lines lines)" >> "$STATS_FILE"
+          if [ -f "$file" ]; then
+            size=$(du -h "$file" | cut -f1)
+            lines=$(wc -l < "$file" 2>/dev/null || echo "0")
+            echo "$file ($size, $lines lines)" >> "$STATS_FILE"
+          fi
         done
         
         echo "📊 统计信息保存到: $STATS_FILE"
+        echo "统计文件内容:"
         cat "$STATS_FILE"
 
     - name: Generate summary report
@@ -239,7 +273,7 @@ jobs:
         EOF
         
         # 添加最新统计
-        LATEST_STATS=$(find results/stats -name "*.txt" | sort | tail -1)
+        LATEST_STATS=$(find results/stats -name "*.txt" -type f | sort | tail -1)
         if [ -f "$LATEST_STATS" ]; then
           echo "### 最新爬取报告" >> "$SUMMARY_FILE"
           echo '```' >> "$SUMMARY_FILE"
@@ -261,9 +295,11 @@ jobs:
         # 添加最近的爬取历史
         echo "## 📅 最近爬取历史" >> "$SUMMARY_FILE"
         echo "" >> "$SUMMARY_FILE"
-        find results -name "crawl_*.jsonl" | sort -r | head -10 | while read file; do
-          size=$(du -h "$file" | cut -f1)
-          echo "- \`$file\` ($size)" >> "$SUMMARY_FILE"
+        find results -name "crawl_*.jsonl" -type f | sort -r | head -10 | while read file; do
+          if [ -f "$file" ]; then
+            size=$(du -h "$file" | cut -f1)
+            echo "- \`$file\` ($size)" >> "$SUMMARY_FILE"
+          fi
         done
         
         echo "📄 总结报告生成完成: $SUMMARY_FILE"
@@ -294,7 +330,7 @@ jobs:
       uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: katana-crawl-results-${{ env.CRAWL_DATE }}-${{ env.CRAWL_TIME }}
+        name: katana-crawl-results-${{ env.CRAWL_DATE_SAFE }}-${{ env.CRAWL_TIME }}
         path: |
           results/
         retention-days: 30
