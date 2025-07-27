@@ -2,147 +2,320 @@ name: Katana Web Crawler
 
 on:
   schedule:
+    # 每天 UTC 时间 02:00 运行（北京时间 10:00）
     - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
       target_urls:
-        description: '目标 URLs'
+        description: '目标URL列表（逗号分隔）'
         required: false
-        default: ''
-      custom_config:
-        description: '自定义配置'
+        default: 'https://example.com'
+      headless_mode:
+        description: '启用无头浏览器模式'
         required: false
-        default: ''
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      crawl_depth:
+        description: '爬取深度'
+        required: false
+        default: '3'
+        type: number
+      crawl_duration:
+        description: '爬取持续时间（如: 30m, 1h）'
+        required: false
+        default: '30m'
 
 env:
-  CRAWL_TIMESTAMP: ${{ github.run_id }}_${{ github.run_number }}
-  PRIVATE_REPO_OWNER: 'liuzhen9320'
-  PRIVATE_REPO_NAME: 'katana_data'
+  # 默认配置
+  DEFAULT_URLS: "https://example.com,https://httpbin.org"
+  CRAWL_DEPTH: ${{ github.event.inputs.crawl_depth || '3' }}
+  CRAWL_DURATION: ${{ github.event.inputs.crawl_duration || '30m' }}
+  HEADLESS_MODE: ${{ github.event.inputs.headless_mode || 'false' }}
+  TARGET_URLS: ${{ github.event.inputs.target_urls || 'https://example.com,https://httpbin.org' }}
 
 jobs:
   crawl:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
-      - name: Setup Environment
-        run: |
-          mkdir -p {scripts,config,data/{raw,processed,final}}
-          mkdir -p data/raw/${CRAWL_TIMESTAMP}
-          echo "CRAWL_DATE=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: '3.11'
-      
-      - name: Install Dependencies
-        run: |
-          sudo apt-get update
-          sudo apt remove --purge man-db manpages manpages-dev
-          sudo apt autoremove
-          sudo apt-get install -y wget curl unzip jq
-          pip install requests beautifulsoup4 lxml pandas PyGithub
+    - name: 🌐 设置 Chrome 浏览器
+      if: env.HEADLESS_MODE == 'true'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y google-chrome-stable
+        google-chrome --version
 
-      - name: Setup Chrome for Headless Mode
-        uses: browser-actions/setup-chrome@latest
-        with:
-          chrome-version: stable
-      
-      - name: Download Scripts from Private Repository
-        env:
-          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        run: |
-          curl -H "Authorization: token $GITHUB_TOKEN" \
-               -H "Accept: application/vnd.github.v3.raw" \
-               -o scripts/setup-katana.sh \
-               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/scripts/setup-katana.sh"
-          
-          curl -H "Authorization: token $GITHUB_TOKEN" \
-               -H "Accept: application/vnd.github.v3.raw" \
-               -o scripts/crawl.sh \
-               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/scripts/crawl.sh"
-          
-          curl -H "Authorization: token $GITHUB_TOKEN" \
-               -H "Accept: application/vnd.github.v3.raw" \
-               -o scripts/process-results.py \
-               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/scripts/process-results.py"
-          
-          curl -H "Authorization: token $GITHUB_TOKEN" \
-               -H "Accept: application/vnd.github.v3.raw" \
-               -o scripts/upload-results.py \
-               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/scripts/upload-results.py"
-          curl -H "Authorization: token $GITHUB_TOKEN" \
-               -H "Accept: application/vnd.github.v3.raw" \
-               -o config/targets.txt \
-               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/config/targets.txt"
-          
-          curl -H "Authorization: token $GITHUB_TOKEN" \
-               -H "Accept: application/vnd.github.v3.raw" \
-               -o config/katana-config.yaml \
-               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/config/katana-config.yaml"
-          chmod +x scripts/*.sh scripts/*.py
-          echo "Scripts downloaded successfully"
-          ls -la scripts/
-          ls -la config/
+    - name: 📦 安装 Katana
+      run: |
+        wget -q https://github.com/projectdiscovery/katana/releases/latest/download/katana_linux_amd64.zip
+        unzip -q katana_linux_amd64.zip
+        chmod +x katana
+        sudo mv katana /usr/local/bin/
+        katana -version
 
-      - name: Download Previous Results for Deduplication
-        env:
-          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        run: |
-          curl -H "Authorization: token $GITHUB_TOKEN" \
-               -H "Accept: application/vnd.github.v3.raw" \
-               -o data/final/all_urls.txt \
-               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/data/final/all_urls.txt" \
-               2>/dev/null || echo "No previous results found"
-          curl -H "Authorization: token $GITHUB_TOKEN" \
-               -H "Accept: application/vnd.github.v3.raw" \
-               -o data/final/overall_stats.json \
-               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/data/final/overall_stats.json" \
-               2>/dev/null || echo "No previous stats found"
-          echo "Previous results download completed"
-      
-      - name: Install Katana
-        run: |
-          ./scripts/setup-katana.sh
-      
-      - name: Prepare Crawl Environment
-        run: |
-          if [ ! -z "${{ github.event.inputs.target_urls }}" ]; then
-            echo "${{ github.event.inputs.target_urls }}" | tr ',' '\n' > data/raw/${CRAWL_TIMESTAMP}/targets.txt
+    - name: 📁 创建目录结构
+      run: |
+        TIMESTAMP=$(date '+%Y/%m/%d')
+        mkdir -p "results/$TIMESTAMP"
+        mkdir -p "results/final"
+        mkdir -p "results/logs"
+        mkdir -p "results/stats"
+        echo "CRAWL_DATE=$TIMESTAMP" >> $GITHUB_ENV
+        echo "CRAWL_TIME=$(date '+%H-%M-%S')" >> $GITHUB_ENV
+
+    - name: 🎯 准备目标 URL
+      run: |
+        echo "$TARGET_URLS" | tr ',' '\n' > results/target_urls.txt
+        cat results/target_urls.txt
+
+    - name: 🕷️ 开始爬取
+      run: |
+        OUTPUT_DIR="results/$CRAWL_DATE"
+        OUTPUT_FILE="$OUTPUT_DIR/crawl_${CRAWL_TIME}.jsonl"
+        LOG_FILE="results/logs/crawl_${CRAWL_DATE/\//-}_${CRAWL_TIME}.log"
+        
+        echo "开始时间: $(date)"
+        
+        # 构建并执行 Katana 命令
+        if [ "$HEADLESS_MODE" = "true" ]; then
+          echo "🖥️ 启用无头浏览器模式..."
+          katana \
+            -list results/target_urls.txt \
+            -d $CRAWL_DEPTH \
+            -ct $CRAWL_DURATION \
+            -c 20 \
+            -p 10 \
+            -rl 100 \
+            -timeout 20 \
+            -retry 2 \
+            -jc \
+            -fx \
+            -td \
+            -aff \
+            -kf all \
+            -jsonl \
+            -o "$OUTPUT_FILE" \
+            -elog "$LOG_FILE" \
+            -v \
+            -hl \
+            -sc \
+            -nos \
+            -ef png,jpg,jpeg,gif,js,css,ico,woff,woff2,ttf,svg || {
+            echo "⚠️ Katana 执行完成，可能存在部分错误"
+            echo "检查日志文件: $LOG_FILE"
+          }
+        else
+          katana \
+            -list results/target_urls.txt \
+            -d $CRAWL_DEPTH \
+            -ct $CRAWL_DURATION \
+            -c 20 \
+            -p 10 \
+            -rl 100 \
+            -timeout 15 \
+            -retry 2 \
+            -jc \
+            -fx \
+            -td \
+            -aff \
+            -kf all \
+            -jsonl \
+            -o "$OUTPUT_FILE" \
+            -elog "$LOG_FILE" \
+            -v \
+            -ef png,jpg,jpeg,gif,js,css,ico,woff,woff2,ttf,svg || {
+            echo "⚠️ Katana 执行完成，可能存在部分错误"
+            echo "检查日志文件: $LOG_FILE"
+          }
+        fi
+        
+        echo "结束时间: $(date)"
+        
+        # 检查输出文件
+        if [ -f "$OUTPUT_FILE" ]; then
+          echo "✅ 爬取完成，结果保存到: $OUTPUT_FILE"
+          echo "文件大小: $(du -h "$OUTPUT_FILE" | cut -f1)"
+          echo "URL数量: $(wc -l < "$OUTPUT_FILE")"
+        else
+          echo "❌ 未生成输出文件"
+          touch "$OUTPUT_FILE"
+        fi
+
+    - name: 🔄 处理和去重结果
+      run: |
+        OUTPUT_DIR="results/$CRAWL_DATE"
+        OUTPUT_FILE="$OUTPUT_DIR/crawl_${CRAWL_TIME}.jsonl"
+        FINAL_FILE="results/final/all_urls.txt"
+        FINAL_JSONL="results/final/all_results.jsonl"
+        STATS_FILE="results/stats/stats_${CRAWL_DATE/\//-}_${CRAWL_TIME}.txt"
+        
+        # 创建统计文件
+        echo "=== Katana 爬取统计报告 ===" > "$STATS_FILE"
+        echo "爬取时间: $(date)" >> "$STATS_FILE"
+        echo "目标 URL: $TARGET_URLS" >> "$STATS_FILE"
+        echo "爬取深度: $CRAWL_DEPTH" >> "$STATS_FILE"
+        echo "爬取持续时间: $CRAWL_DURATION" >> "$STATS_FILE"
+        echo "无头模式: $HEADLESS_MODE" >> "$STATS_FILE"
+        echo "" >> "$STATS_FILE"
+        
+        # 处理当前结果
+        if [ -f "$OUTPUT_FILE" ] && [ -s "$OUTPUT_FILE" ]; then
+          # 提取URL到纯文本文件
+          CURRENT_URLS="$OUTPUT_DIR/urls_${CRAWL_TIME}.txt"
+          jq -r '.url // empty' "$OUTPUT_FILE" 2>/dev/null | sort -u > "$CURRENT_URLS" || {
+            # 如果jq失败，尝试直接提取URL（假设每行是URL）
+            grep -E '^https?://' "$OUTPUT_FILE" | sort -u > "$CURRENT_URLS" || {
+              echo "⚠️ 无法解析JSONL文件，创建空文件"
+              touch "$CURRENT_URLS"
+            }
+          }
+          
+          CURRENT_COUNT=$(wc -l < "$CURRENT_URLS")
+          echo "本次爬取URL数量: $CURRENT_COUNT" >> "$STATS_FILE"
+          
+          # 更新最终去重文件
+          if [ -f "$FINAL_FILE" ]; then
+            # 合并并去重
+            cat "$FINAL_FILE" "$CURRENT_URLS" | sort -u > "$FINAL_FILE.tmp"
+            mv "$FINAL_FILE.tmp" "$FINAL_FILE"
           else
-            cp config/targets.txt data/raw/${CRAWL_TIMESTAMP}/targets.txt
+            cp "$CURRENT_URLS" "$FINAL_FILE"
           fi
-          echo "Targets prepared:"
-          cat data/raw/${CRAWL_TIMESTAMP}/targets.txt
-      
-      - name: Run Katana Crawl
-        run: |
-          ./scripts/crawl.sh "${CRAWL_TIMESTAMP}"
-        timeout-minutes: 45
+          
+          # 更新最终JSONL文件
+          if [ -f "$FINAL_JSONL" ]; then
+            cat "$FINAL_JSONL" "$OUTPUT_FILE" > "$FINAL_JSONL.tmp"
+            mv "$FINAL_JSONL.tmp" "$FINAL_JSONL"
+          else
+            cp "$OUTPUT_FILE" "$FINAL_JSONL"
+          fi
+          
+        else
+          echo "本次爬取URL数量: 0" >> "$STATS_FILE"
+          touch "$OUTPUT_DIR/urls_${CRAWL_TIME}.txt"
+        fi
+        
+        # 计算总统计
+        if [ -f "$FINAL_FILE" ]; then
+          TOTAL_COUNT=$(wc -l < "$FINAL_FILE")
+          echo "累计去重URL总数: $TOTAL_COUNT" >> "$STATS_FILE"
+        else
+          echo "累计去重URL总数: 0" >> "$STATS_FILE"
+          touch "$FINAL_FILE"
+        fi
+        
+        # 目录结构统计
+        echo "" >> "$STATS_FILE"
+        echo "=== 目录结构 ===" >> "$STATS_FILE"
+        find results -type f -name "*.txt" -o -name "*.jsonl" -o -name "*.log" | while read file; do
+          size=$(du -h "$file" | cut -f1)
+          lines=$(wc -l < "$file" 2>/dev/null || echo "0")
+          echo "$file ($size, $lines lines)" >> "$STATS_FILE"
+        done
+        
+        echo "📊 统计信息保存到: $STATS_FILE"
+        cat "$STATS_FILE"
 
-      - name: Process Results
-        run: |
-          python scripts/process-results.py "${CRAWL_TIMESTAMP}"
+    - name: Generate summary report
+      run: |
+        echo "📋 生成总结报告..."
+        
+        SUMMARY_FILE="results/SUMMARY.md"
+        
+        cat > "$SUMMARY_FILE" << 'EOF'
+        # Katana 爬虫结果总结
+        ## 📊 最新统计
 
-      - name: Upload Results to Private Repository
-        env:
-          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
-        run: |
-          python scripts/upload-results.py "${CRAWL_TIMESTAMP}" "${PRIVATE_REPO_OWNER}" "${PRIVATE_REPO_NAME}"
+        EOF
+        
+        # 添加最新统计
+        LATEST_STATS=$(find results/stats -name "*.txt" | sort | tail -1)
+        if [ -f "$LATEST_STATS" ]; then
+          echo "### 最新爬取报告" >> "$SUMMARY_FILE"
+          echo '```' >> "$SUMMARY_FILE"
+          cat "$LATEST_STATS" >> "$SUMMARY_FILE"
+          echo '```' >> "$SUMMARY_FILE"
+          echo "" >> "$SUMMARY_FILE"
+        fi
+        
+        # 添加文件列表
+        echo "## 📁 文件结构" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        echo "- \`final/all_urls.txt\` - 所有去重后的 URL 列表" >> "$SUMMARY_FILE"
+        echo "- \`final/all_results.jsonl\` - 所有详细结果（JSONL格式）" >> "$SUMMARY_FILE"
+        echo "- \`YYYY/MM/DD/\` - 按日期组织的爬取结果" >> "$SUMMARY_FILE"
+        echo "- \`logs/\` - 爬取日志文件" >> "$SUMMARY_FILE"
+        echo "- \`stats/\` - 统计报告文件" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        
+        # 添加最近的爬取历史
+        echo "## 📅 最近爬取历史" >> "$SUMMARY_FILE"
+        echo "" >> "$SUMMARY_FILE"
+        find results -name "crawl_*.jsonl" | sort -r | head -10 | while read file; do
+          size=$(du -h "$file" | cut -f1)
+          echo "- \`$file\` ($size)" >> "$SUMMARY_FILE"
+        done
+        
+        echo "📄 总结报告生成完成: $SUMMARY_FILE"
 
-      - name: Upload Artifacts (Backup)
-        uses: actions/upload-artifact@v4
-        with:
-          name: crawl-results-${{ env.CRAWL_TIMESTAMP }}
-          path: |
-            data/raw/${{ env.CRAWL_TIMESTAMP }}/
-            data/final/
-          retention-days: 2
-        if: always()
+    - name: 📤 提交结果到仓库
+      run: |
+        git config --local user.email "bot@932.moe"
+        git config --local user.name "HelloTools-bot"
+        git add results/
+        if git diff --staged --quiet; then
+          echo "📭 没有新的更改需要提交"
+        else
+          COMMIT_MSG="🕷️ Katana crawl results - $(date '+%Y-%m-%d %H:%M:%S')"
+          if [ -f "results/final/all_urls.txt" ]; then
+            TOTAL_URLS=$(wc -l < "results/final/all_urls.txt")
+            COMMIT_MSG="$COMMIT_MSG
 
-      - name: Cleanup
-        run: |
-          rm -f scripts/upload-results.py
-          rm -f config/targets.txt
-          echo "Cleanup completed"
-        if: always()
+        📊 Total unique URLs: $TOTAL_URLS
+        🔍 Depth: $CRAWL_DEPTH | Duration: $CRAWL_DURATION
+        🖥️ Headless mode: $HEADLESS_MODE"
+          fi
+          git commit -m "$COMMIT_MSG"
+          git push
+          echo "✅ 结果已成功提交到仓库"
+        fi
+
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: katana-crawl-results-${{ env.CRAWL_DATE }}-${{ env.CRAWL_TIME }}
+        path: |
+          results/
+        retention-days: 30
+
+    - name: 🎉 爬取任务完成
+      run: |
+        echo "🎉 爬取任务完成！"
+        echo ""
+        echo "📊 最终统计:"
+        if [ -f "results/final/all_urls.txt" ]; then
+          echo "- 累计 URL 总数: $(wc -l < results/final/all_urls.txt)"
+        fi
+        echo "- 本次爬取时间: $CRAWL_DATE $CRAWL_TIME"
+        echo "- 目标URL: $TARGET_URLS"
+        echo "- 爬取深度: $CRAWL_DEPTH"
+        echo "- 持续时间: $CRAWL_DURATION"
+        echo "- 无头模式: $HEADLESS_MODE"
+        echo ""
+        echo "📁 结果文件位置:"
+        echo "- results/final/all_urls.txt (去重URL列表)"
+        echo "- results/final/all_results.jsonl (详细结果)"
+        echo "- results/$CRAWL_DATE/ (本次结果)"
+        echo ""
+        echo "📋 查看完整报告: results/SUMMARY.md"
