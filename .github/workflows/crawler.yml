@@ -27,6 +27,10 @@ on:
         description: '爬取持续时间（如: 30m, 1h）'
         required: false
         default: '30m'
+      katana_version:
+        description: 'Katana 版本'
+        required: false
+        default: 'v1.2.1'
 
 env:
   # 默认配置
@@ -35,6 +39,7 @@ env:
   CRAWL_DURATION: ${{ github.event.inputs.crawl_duration || '30m' }}
   HEADLESS_MODE: ${{ github.event.inputs.headless_mode || 'false' }}
   TARGET_URLS: ${{ github.event.inputs.target_urls || 'https://example.com,https://httpbin.org' }}
+  KATANA_VERSION: ${{ github.event.inputs.katana_version || 'v1.2.1' }}
 
 jobs:
   crawl:
@@ -57,8 +62,9 @@ jobs:
 
     - name: 📦 安装 Katana
       run: |
-        wget -q https://github.com/projectdiscovery/katana/releases/download/v1.2.1/katana_1.2.1_windows_amd64.zip
-        unzip -q katana_1.2.1_windows_amd64.zip
+        KATANA_URL="https://github.com/projectdiscovery/katana/releases/download/${KATANA_VERSION}/katana_${KATANA_VERSION#v}_linux_amd64.zip"
+        wget -q "$KATANA_URL" -O katana.zip
+        unzip -q katana.zip
         chmod +x katana
         sudo mv katana /usr/local/bin/
         katana -version
