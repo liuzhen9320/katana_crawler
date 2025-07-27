@@ -196,15 +196,20 @@ jobs:
           
           # 尝试解析JSONL文件
           if command -v jq >/dev/null 2>&1; then
-            jq -r '.url // empty' "$OUTPUT_FILE" 2>/dev/null | grep -E '^https?://' | sort -u > "$CURRENT_URLS" || {
+            # 尝试多种可能的URL字段
+            {
+              jq -r '.url // empty' "$OUTPUT_FILE" 2>/dev/null
+              jq -r '.request.endpoint // empty' "$OUTPUT_FILE" 2>/dev/null
+              jq -r '.endpoint // empty' "$OUTPUT_FILE" 2>/dev/null
+            } | grep -E '^https?://' | sort -u > "$CURRENT_URLS" || {
               echo "⚠️ jq 解析失败，尝试直接提取URL"
-              grep -E '^https?://' "$OUTPUT_FILE" | sort -u > "$CURRENT_URLS" || {
+              grep -oE 'https?://[^"]*' "$OUTPUT_FILE" | sort -u > "$CURRENT_URLS" || {
                 echo "⚠️ 无法解析文件，创建空文件"
                 touch "$CURRENT_URLS"
               }
             }
           else
-            # 没有jq命令时的备用方案
+            # 没有 jq 命令时的备用方案
             grep -oE 'https?://[^"]*' "$OUTPUT_FILE" | sort -u > "$CURRENT_URLS" || {
               echo "⚠️ 无法解析文件，创建空文件"
               touch "$CURRENT_URLS"
