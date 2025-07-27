@@ -2,7 +2,6 @@ name: Katana Web Crawler
 
 on:
   schedule:
-    # 每天 UTC 时间 02:00 运行（北京时间 10:00）
     - cron: '0 2 * * *'
   workflow_dispatch:
     inputs:
@@ -88,7 +87,6 @@ jobs:
       run: |
         OUTPUT_DIR="results/$CRAWL_DATE"
         OUTPUT_FILE="$OUTPUT_DIR/crawl_${CRAWL_TIME}.jsonl"
-        LOG_FILE="results/logs/crawl_${CRAWL_DATE/\//-}_${CRAWL_TIME}.log"
         
         echo "开始时间: $(date)"
         
@@ -111,14 +109,12 @@ jobs:
             -kf all \
             -jsonl \
             -o "$OUTPUT_FILE" \
-            -elog "$LOG_FILE" \
             -v \
             -hl \
             -sc \
             -nos \
             -ef png,jpg,jpeg,gif,js,css,ico,woff,woff2,ttf,svg || {
             echo "⚠️ Katana 执行完成，可能存在部分错误"
-            echo "检查日志文件: $LOG_FILE"
           }
         else
           katana \
@@ -137,11 +133,9 @@ jobs:
             -kf all \
             -jsonl \
             -o "$OUTPUT_FILE" \
-            -elog "$LOG_FILE" \
             -v \
             -ef png,jpg,jpeg,gif,js,css,ico,woff,woff2,ttf,svg || {
             echo "⚠️ Katana 执行完成，可能存在部分错误"
-            echo "检查日志文件: $LOG_FILE"
           }
         fi
         
