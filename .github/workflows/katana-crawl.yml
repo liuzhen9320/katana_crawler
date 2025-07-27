@@ -1,0 +1,146 @@
+name: Katana Web Crawler
+
+on:
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      target_urls:
+        description: '目标 URLs'
+        required: false
+        default: ''
+      custom_config:
+        description: '自定义配置'
+        required: false
+        default: ''
+
+env:
+  CRAWL_TIMESTAMP: ${{ github.run_id }}_${{ github.run_number }}
+  PRIVATE_REPO_OWNER: 'liuzhen9320'
+  PRIVATE_REPO_NAME: 'katana_data'
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Setup Environment
+        run: |
+          mkdir -p {scripts,config,data/{raw,processed,final}}
+          mkdir -p data/raw/${CRAWL_TIMESTAMP}
+          echo "CRAWL_DATE=$(date +%Y%m%d_%H%M%S)" >> $GITHUB_ENV
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+      
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget curl unzip jq
+          pip install requests beautifulsoup4 lxml pandas PyGithub
+
+      - name: Setup Chrome for Headless Mode
+        uses: browser-actions/setup-chrome@latest
+        with:
+          chrome-version: stable
+      
+      - name: Download Scripts from Private Repository
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          curl -H "Authorization: token $GITHUB_TOKEN" \
+               -H "Accept: application/vnd.github.v3.raw" \
+               -o scripts/setup-katana.sh \
+               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/scripts/setup-katana.sh"
+          
+          curl -H "Authorization: token $GITHUB_TOKEN" \
+               -H "Accept: application/vnd.github.v3.raw" \
+               -o scripts/crawl.sh \
+               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/scripts/crawl.sh"
+          
+          curl -H "Authorization: token $GITHUB_TOKEN" \
+               -H "Accept: application/vnd.github.v3.raw" \
+               -o scripts/process-results.py \
+               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/scripts/process-results.py"
+          
+          curl -H "Authorization: token $GITHUB_TOKEN" \
+               -H "Accept: application/vnd.github.v3.raw" \
+               -o scripts/upload-results.py \
+               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/scripts/upload-results.py"
+          curl -H "Authorization: token $GITHUB_TOKEN" \
+               -H "Accept: application/vnd.github.v3.raw" \
+               -o config/targets.txt \
+               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/config/targets.txt"
+          
+          curl -H "Authorization: token $GITHUB_TOKEN" \
+               -H "Accept: application/vnd.github.v3.raw" \
+               -o config/katana-config.yaml \
+               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/config/katana-config.yaml"
+          chmod +x scripts/*.sh scripts/*.py
+          echo "Scripts downloaded successfully"
+          ls -la scripts/
+          ls -la config/
+
+      - name: Download Previous Results for Deduplication
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          curl -H "Authorization: token $GITHUB_TOKEN" \
+               -H "Accept: application/vnd.github.v3.raw" \
+               -o data/final/all_urls.txt \
+               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/data/final/all_urls.txt" \
+               2>/dev/null || echo "No previous results found"
+          curl -H "Authorization: token $GITHUB_TOKEN" \
+               -H "Accept: application/vnd.github.v3.raw" \
+               -o data/final/overall_stats.json \
+               "https://api.github.com/repos/${PRIVATE_REPO_OWNER}/${PRIVATE_REPO_NAME}/contents/data/final/overall_stats.json" \
+               2>/dev/null || echo "No previous stats found"
+          echo "Previous results download completed"
+      
+      - name: Install Katana
+        run: |
+          ./scripts/setup-katana.sh
+      
+      - name: Prepare Crawl Environment
+        run: |
+          if [ ! -z "${{ github.event.inputs.target_urls }}" ]; then
+            echo "${{ github.event.inputs.target_urls }}" | tr ',' '\n' > data/raw/${CRAWL_TIMESTAMP}/targets.txt
+          else
+            cp config/targets.txt data/raw/${CRAWL_TIMESTAMP}/targets.txt
+          fi
+          echo "Targets prepared:"
+          cat data/raw/${CRAWL_TIMESTAMP}/targets.txt
+      
+      - name: Run Katana Crawl
+        run: |
+          ./scripts/crawl.sh "${CRAWL_TIMESTAMP}"
+        timeout-minutes: 45
+
+      - name: Process Results
+        run: |
+          python scripts/process-results.py "${CRAWL_TIMESTAMP}"
+
+      - name: Upload Results to Private Repository
+        env:
+          GITHUB_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+        run: |
+          python scripts/upload-results.py "${CRAWL_TIMESTAMP}" "${PRIVATE_REPO_OWNER}" "${PRIVATE_REPO_NAME}"
+
+      - name: Upload Artifacts (Backup)
+        uses: actions/upload-artifact@v4
+        with:
+          name: crawl-results-${{ env.CRAWL_TIMESTAMP }}
+          path: |
+            data/raw/${{ env.CRAWL_TIMESTAMP }}/
+            data/final/
+          retention-days: 2
+        if: always()
+
+      - name: Cleanup
+        run: |
+          rm -f scripts/upload-results.py
+          rm -f config/targets.txt
+          echo "Cleanup completed"
+        if: always()
